@@ -1,6 +1,5 @@
-import streamlit as st
+ import streamlit as st
 import pandas as pd
-import pandas_ta as ta
 import yfinance as yf
 import plotly.graph_objects as go
 import numpy as np
@@ -12,7 +11,7 @@ st.title("XAUT/USD Liquidity Sweep V2 - Backtesting App")
 # Sidebar for Strategy Parameters
 st.sidebar.header("Strategy Parameters")
 initial_capital = st.sidebar.number_input("Initial Capital ($)", value=1000)
-lot_size = st.sidebar.number_input("Lot Size (oz)", value=1.0, help="0.01 lot standard = 1 oz") 
+lot_size = st.sidebar.number_input("Lot Size (oz)", value=1.0) 
 pivot_len = st.sidebar.number_input("Liquidity Swing", min_value=2, value=3)
 confirm_bars = st.sidebar.number_input("MSS Confirmation Bars", min_value=1, value=6)
 ema_len = st.sidebar.number_input("H1 EMA Length", min_value=10, value=50)
@@ -24,12 +23,11 @@ days_history = st.sidebar.slider("Days of Data (15m TF)", min_value=5, max_value
 # --- 2. DATA FETCHING ---
 @st.cache_data(ttl=900)
 def get_data(days):
-    # Fetching Gold (GC=F) as proxy for XAUT
     df = yf.download("GC=F", period=f"{days}d", interval="15m")
     df_h1 = yf.download("GC=F", period="60d", interval="1h")
     
-    # Calculate H1 EMA and reindex to 15m timeframe
-    df_h1['H1_EMA'] = ta.ema(df_h1['Close'], length=ema_len)
+    # Calculate H1 EMA manually
+    df_h1['H1_EMA'] = df_h1['Close'].ewm(span=ema_len, adjust=False).mean()
     df_h1 = df_h1[['H1_EMA']].resample('15T').ffill()
     
     df = df.join(df_h1, how='left').ffill()
@@ -54,7 +52,13 @@ if not df.empty:
 
     df['Struct_High'] = df['High'].shift(1).rolling(pivot_len * 2).max()
     df['Struct_Low'] = df['Low'].shift(1).rolling(pivot_len * 2).min()
-    df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_len)
+    
+    # Calculate ATR manually (TradingView RMA style)
+    high_low = df['High'] - df['Low']
+    high_close = (df['High'] - df['Close'].shift()).abs()
+    low_close = (df['Low'] - df['Close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['ATR'] = tr.ewm(alpha=1/atr_len, adjust=False).mean()
 
     # --- 4. BACKTESTING ENGINE ---
     balance = initial_capital
@@ -74,27 +78,27 @@ if not df.empty:
         row = df.iloc[i]
         date = df.index[i]
         
-        # 1. Manage Active Positions (Exits)
+        # Manage Active Positions (Exits)
         if in_pos:
             if pos_type == 'LONG':
-                if row['Low'] <= sl: # Stop Loss Hit
+                if row['Low'] <= sl: 
                     loss = (sl - entry_price) * lot_size
                     balance += loss
                     trade_log.append({'Date': date, 'Type': 'LONG', 'Entry': entry_price, 'Exit': sl, 'Result': 'Loss', 'PnL': loss, 'Balance': balance})
                     in_pos = False
-                elif row['High'] >= tp: # Take Profit Hit
+                elif row['High'] >= tp: 
                     profit = (tp - entry_price) * lot_size
                     balance += profit
                     trade_log.append({'Date': date, 'Type': 'LONG', 'Entry': entry_price, 'Exit': tp, 'Result': 'Win', 'PnL': profit, 'Balance': balance})
                     in_pos = False
             
             elif pos_type == 'SHORT':
-                if row['High'] >= sl: # Stop Loss Hit
+                if row['High'] >= sl: 
                     loss = (entry_price - sl) * lot_size
                     balance += loss
                     trade_log.append({'Date': date, 'Type': 'SHORT', 'Entry': entry_price, 'Exit': sl, 'Result': 'Loss', 'PnL': loss, 'Balance': balance})
                     in_pos = False
-                elif row['Low'] <= tp: # Take Profit Hit
+                elif row['Low'] <= tp: 
                     profit = (entry_price - tp) * lot_size
                     balance += profit
                     trade_log.append({'Date': date, 'Type': 'SHORT', 'Entry': entry_price, 'Exit': tp, 'Result': 'Win', 'PnL': profit, 'Balance': balance})
@@ -102,7 +106,7 @@ if not df.empty:
 
         equity_curve.append(balance)
 
-        # 2. Manage Setups
+        # Manage Setups
         if active_long_setup > 0: active_long_setup -= 1
         if active_short_setup > 0: active_short_setup -= 1
 
@@ -116,7 +120,7 @@ if not df.empty:
         bull_mss = (active_long_setup > 0) and (row['Close'] > row['Struct_High'])
         bear_mss = (active_short_setup > 0) and (row['Close'] < row['Struct_Low'])
 
-        # 3. Enter New Positions (Pyramiding = 0)
+        # Enter New Positions
         if not in_pos:
             if bull_mss and (not use_trend or row['Bull_Trend']):
                 sl = current_sweep_low - (row['ATR'] * 0.15)
@@ -126,7 +130,7 @@ if not df.empty:
                     entry_price = row['Close']
                     pos_type = 'LONG'
                     in_pos = True
-                    active_long_setup = 0 # Reset setup
+                    active_long_setup = 0 
             
             elif bear_mss and (not use_trend or row['Bear_Trend']):
                 sl = current_sweep_high + (row['ATR'] * 0.15)
@@ -136,16 +140,15 @@ if not df.empty:
                     entry_price = row['Close']
                     pos_type = 'SHORT'
                     in_pos = True
-                    active_short_setup = 0 # Reset setup
+                    active_short_setup = 0 
 
     df['Equity'] = equity_curve
     trade_df = pd.DataFrame(trade_log)
 
-    # --- 5. UI DISPLAY (Tabs for Organization) ---
+    # --- 5. UI DISPLAY ---
     tab1, tab2, tab3 = st.tabs(["Dashboard & Metrics", "Equity Curve", "Trade Log"])
 
     with tab1:
-        # Calculate Metrics
         total_trades = len(trade_df)
         if total_trades > 0:
             winning_trades = len(trade_df[trade_df['Result'] == 'Win'])
@@ -155,20 +158,17 @@ if not df.empty:
             win_rate = 0
             net_profit = 0
 
-        # Display Metrics
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Final Balance", f"${balance:,.2f}", f"{net_profit:,.2f}")
         col2.metric("Total Trades", total_trades)
         col3.metric("Win Rate", f"{win_rate:.1f}%")
         col4.metric("Risk / Reward", f"1 : {rr_ratio}")
 
-        # Plot Price Chart
         fig = go.Figure()
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
         fig.add_trace(go.Scatter(x=df.index, y=df['Liquidity_High'], mode='lines', line=dict(color='red', width=1, dash='dot'), name='Liq High'))
         fig.add_trace(go.Scatter(x=df.index, y=df['Liquidity_Low'], mode='lines', line=dict(color='green', width=1, dash='dot'), name='Liq Low'))
         
-        # Mark Entries on Chart
         if not trade_df.empty:
             longs = trade_df[trade_df['Type'] == 'LONG']
             shorts = trade_df[trade_df['Type'] == 'SHORT']
@@ -179,14 +179,12 @@ if not df.empty:
         st.plotly_chart(fig, use_container_width=True)
 
     with tab2:
-        # Equity Curve Chart
         fig_equity = go.Figure()
         fig_equity.add_trace(go.Scatter(x=df.index, y=df['Equity'], mode='lines', line=dict(color='#00ff00', width=2), name='Equity', fill='tozeroy', fillcolor='rgba(0, 255, 0, 0.1)'))
         fig_equity.update_layout(height=500, template='plotly_dark', title="Account Equity Growth")
         st.plotly_chart(fig_equity, use_container_width=True)
 
     with tab3:
-        # Trade Log Dataframe
         if not trade_df.empty:
             st.dataframe(trade_df.style.map(lambda x: 'color: green' if x == 'Win' else ('color: red' if x == 'Loss' else ''), subset=['Result']))
         else:
