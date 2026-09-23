@@ -26,6 +26,12 @@ def get_data(days):
     df = yf.download("GC=F", period=f"{days}d", interval="15m")
     df_h1 = yf.download("GC=F", period="60d", interval="1h")
     
+    # Strip hidden ticker layers from yfinance columns
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+    if isinstance(df_h1.columns, pd.MultiIndex):
+        df_h1.columns = df_h1.columns.droplevel(1)
+    
     # Calculate H1 EMA manually
     df_h1['H1_EMA'] = df_h1['Close'].ewm(span=ema_len, adjust=False).mean()
     df_h1 = df_h1[['H1_EMA']].resample('15min').ffill()
@@ -33,6 +39,7 @@ def get_data(days):
     df = df.join(df_h1, how='left').ffill()
     df.dropna(inplace=True)
     return df
+
 
 with st.spinner("Fetching data and running backtest..."):
     df = get_data(days_history)
