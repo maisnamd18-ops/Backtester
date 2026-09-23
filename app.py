@@ -28,7 +28,7 @@ def get_data(days):
     
     # Calculate H1 EMA manually
     df_h1['H1_EMA'] = df_h1['Close'].ewm(span=ema_len, adjust=False).mean()
-    df_h1 = df_h1[['H1_EMA']].resample('15T').ffill()
+    df_h1 = df_h1[['H1_EMA']].resample('15min').ffill()
     
     df = df.join(df_h1, how='left').ffill()
     df.dropna(inplace=True)
